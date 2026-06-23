@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>歩行解析AI — 浦添総合病院</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #f5f5f3; min-height: 100vh; }
+  input, select, textarea, button { font-family: inherit; }
+
+  /* APIキー入力バナー */
+  #api-banner {
+    background: #185FA5; color: #fff;
+    padding: 10px 16px; font-size: 13px;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  #api-banner input {
+    flex: 1; min-width: 240px; padding: 5px 10px;
+    border: none; border-radius: 6px; font-size: 13px;
+    background: rgba(255,255,255,0.15); color: #fff;
+  }
+  #api-banner input::placeholder { color: rgba(255,255,255,0.6); }
+  #api-banner button {
+    padding: 5px 14px; background: #fff; color: #185FA5;
+    border: none; border-radius: 6px; font-size: 13px;
+    font-weight: 500; cursor: pointer;
+  }
+
+  @keyframes pulse { 0%,100%{opacity:.3} 50%{opacity:1} }
+  .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #378ADD; display: inline-block;
+    animation: pulse 1s infinite;
+  }
+  .dot:nth-child(2) { animation-delay: .2s; }
+  .dot:nth-child(3) { animation-delay: .4s; }
+</style>
+</head>
+<body>
+
+<!-- APIキー入力バナー -->
+<div id="api-banner">
+  <span>🔑 Anthropic APIキー</span>
+  <input type="password" id="api-key-input" placeholder="sk-ant-..." />
+  <button onclick="saveKey()">保存</button>
+  <span id="key-status" style="font-size:12px;opacity:0.8"></span>
+</div>
+
+<div id="root"></div>
+
+<script>
+  // APIキー管理（sessionStorageに保持）
+  window.saveKey = function() {
+    const key = document.getElementById('api-key-input').value.trim();
+    if (!key) return;
+    sessionStorage.setItem('anthropic_key', key);
+    document.getElementById('key-status').textContent = '✓ 保存済み';
+    document.getElementById('api-key-input').value = '●'.repeat(20);
+  }
+  window.getKey = function() {
+    return sessionStorage.getItem('anthropic_key') || '';
+  }
+  // ページ読み込み時に既存キーを反映
+  window.addEventListener('DOMContentLoaded', () => {
+    if (getKey()) {
+      document.getElementById('api-key-input').value = '●'.repeat(20);
+      document.getElementById('key-status').textContent = '✓ 保存済み';
+    }
+  });
+</script>
+
+<script type="text/babel">
+const { useState, useRef, useEffect } = React;
+
+// ── 定数 ──────────────────────────────────────────────
+const CHECKS = {
+  sagittal: [
+    "カメラは被験者の側面に設置",
+    "高さ：大転子（腰の骨）に合わせる（約80–100 cm）",
+    "距離：3〜5 m を確保",
+    "歩行路は左→右または右→左の一方向",
+    "背景は単色・無地",
+    "逆光を避け、均一な照明",
+    "被験者の服装：関節が見えるタイツ・短パン",
+  ],
+  frontal: [
+    "カメラは被験者の正面に設置",
+    "高さ：胸骨柄（約130–140 cm）に合わせる",
+    "距離：5〜8 m を確保",
+    "被験者はカメラに向かって歩く",
+    "骨盤・膝・足先の対称性が確認できる位置",
+    "背景は単色・無地",
+    "被験者の服装：関節が見えるタイツ・短パン",
+  ],
+};
+const STEPS = ["カメラ設定", "動画入力", "AI解析", "レポート"];
+
+// ── 共通UI部品 ──────────────────────────────────────
+function StepNav({ current }) {
+  return (
+    <div style={{ display:"flex", border:"0.5px solid #ddd", borderRadius:12, overflow:"hidden", marginBottom:"1.5rem" }}>
+      {STEPS.map((label, i) => (
+        <div key={i} style={{
+          flex:1, padding:"10px 4px", fontSize:12, textAlign:"center",
+          background: i === current ? "#f0f4f8" : "#fff",
+          color: i < current ? "#1D9E75" : i === current ? "#111" : "#aaa",
+          fontWeight: i === current ? 500 : 400,
+          borderRight: i < STEPS.length-1 ? "0.5px solid #ddd" : "none",
+          display:"flex", flexDirection:"column", alignItems:"center", gap:4,
+        }}>
+          <div style={{
+            width:20, height:20, borderRadius:"50%",
+            border:`1.5px solid ${i < current ? "#1D9E75" : i===current ? "#111" : "#bbb"}`,
+            background: i < current ? "#1D9E75" : "transparent",
+            display:"flex", alignItems:"center", justifyContent:"center",
+            fontSize:10, color: i < current ? "#fff" : "inherit",
+          }}>
+            {i < current ? "✓" : i+1}
+          </div>
+          {label}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const Card = ({ children, style }) => (
+  <div style={{ background:"#fff", border:"0.5px solid #e0e0e0", borderRadius:12, padding:"1.25rem", marginBottom:"1rem", ...style }}>
+    {children}
+  </div>
+);
+
+const CardTitle = ({ icon, children }) => (
+  <div style={{ fontWeight:500, fontSize:15, marginBottom:"0.75rem", display:"flex", alignItems:"center", gap:8 }}>
+    <span style={{ fontSize:18 }}>{icon}</span>{children}
+  </div>
+);
+
+const NavRow = ({ children }) => (
+  <div style={{ display:"flex", gap:8, marginTop:"1rem" }}>{children}</div>
+);
+
+const Btn = ({ onClick, primary, disabled, children }) => (
+  <button onClick={onClick} disabled={disabled} style={{
+    flex:1, padding:"11px 0", fontSize:14, fontWeight: primary ? 500 : 400,
+    background: primary ? "#185FA5" : "#fff",
+    color: primary ? "#fff" : "#333",
+    border: primary ? "none" : "0.5px solid #ccc",
+    borderRadius:8, cursor: disabled ? "not-allowed" : "pointer",
+    opacity: disabled ? 0.5 : 1,
+  }}>
+    {children}
+  </button>
+);
+
+const ModeTabs = ({ options, value, onChange }) => (
+  <div style={{ display:"flex", gap:8, marginBottom:"1rem" }}>
+    {options.map(([v, label]) => (
+      <button key={v} onClick={() => onChange(v)} style={{
+        flex:1, padding:"8px 0", fontSize:13,
+        background: value===v ? "#E6F1FB" : "#fff",
+        color: value===v ? "#185FA5" : "#555",
+        border: value===v ? "1.5px solid #185FA5" : "0.5px solid #ccc",
+        borderRadius:8, cursor:"pointer", fontWeight: value===v ? 500 : 400,
+      }}>
+        {label}
+      </button>
+    ))}
+  </div>
+);
+
+// ── Step 1: カメラ設定 ──────────────────────────────
+function Step1({ onNext }) {
+  const [angle, setAngle] = useState("sagittal");
+  const [checked, setChecked] = useState({});
+
+  const handleAngle = (v) => { setAngle(v); setChecked({}); };
+
+  const specs = angle === "sagittal"
+    ? [["カメラ距離","3〜5 m"],["カメラ高さ","大転子（約80–100 cm）"],["フレームレート","60 fps 以上"],["解像度","1080p 以上"],["背景","単色・無地推奨"],["照明","逆光を避ける・均一に"],["被験者服装","関節が見えるタイツ・短パン"]]
+    : [["カメラ距離","5〜8 m"],["カメラ高さ","胸骨柄（約130–140 cm）"],["フレームレート","60 fps 以上"],["解像度","1080p 以上"],["背景","単色・無地推奨"],["照明","逆光を避ける・均一に"],["被験者服装","関節が見えるタイツ・短パン"]];
+
+  return (
+    <div>
+      <Card>
+        <CardTitle icon="📐">撮影アングルを選ぶ</CardTitle>
+        <ModeTabs options={[["sagittal","側面（矢状面）"],["frontal","正面"]]} value={angle} onChange={handleAngle} />
+
+        {/* カメラ配置SVG */}
+        <svg viewBox="0 0 640 220" style={{ width:"100%", borderRadius:8, background:"#f8f9fb", marginBottom:"0.75rem" }}>
+          <rect x="60" y="185" width="520" height="4" rx="2" fill="#d0d0d0"/>
+          <ellipse cx="300" cy="82" rx="18" ry="18" fill="none" stroke="#378ADD" strokeWidth="2"/>
+          <line x1="300" y1="100" x2="300" y2="152" stroke="#378ADD" strokeWidth="2"/>
+          <line x1="300" y1="118" x2="278" y2="142" stroke="#378ADD" strokeWidth="2"/>
+          <line x1="300" y1="118" x2="322" y2="142" stroke="#378ADD" strokeWidth="2"/>
+          <line x1="300" y1="152" x2="283" y2="188" stroke="#378ADD" strokeWidth="2"/>
+          <line x1="300" y1="152" x2="317" y2="188" stroke="#378ADD" strokeWidth="2"/>
+          <text x="300" y="210" textAnchor="middle" fontSize="11" fill="#888">被験者</text>
+          {angle === "sagittal" ? (<>
+            <rect x="510" y="148" width="52" height="30" rx="5" fill="none" stroke="#E24B4A" strokeWidth="2"/>
+            <ellipse cx="536" cy="163" rx="9" ry="9" fill="none" stroke="#E24B4A" strokeWidth="1.5"/>
+            <line x1="510" y1="163" x2="330" y2="163" stroke="#E24B4A" strokeWidth="1" strokeDasharray="5,4"/>
+            <line x1="335" y1="178" x2="505" y2="178" stroke="#E24B4A" strokeWidth="1"/>
+            <polygon points="335,175 328,178 335,181" fill="#E24B4A"/>
+            <polygon points="505,175 512,178 505,181" fill="#E24B4A"/>
+            <text x="420" y="172" fontSize="10" fill="#E24B4A" textAnchor="middle">3–5 m</text>
+            <text x="536" y="210" textAnchor="middle" fontSize="11" fill="#E24B4A">カメラ（側面）</text>
+            <text x="560" y="145" fontSize="10" fill="#E24B4A">腰高</text>
+            <line x1="536" y1="128" x2="536" y2="148" stroke="#E24B4A" strokeWidth="1" strokeDasharray="3,3"/>
+          </>) : (<>
+            <rect x="270" y="25" width="60" height="32" rx="5" fill="none" stroke="#E24B4A" strokeWidth="2"/>
+            <ellipse cx="300" cy="41" rx="10" ry="10" fill="none" stroke="#E24B4A" strokeWidth="1.5"/>
+            <line x1="300" y1="57" x2="300" y2="63" stroke="#E24B4A" strokeWidth="1" strokeDasharray="4,4"/>
+            <text x="300" y="19" textAnchor="middle" fontSize="11" fill="#E24B4A">カメラ（正面・胸高）</text>
+            <text x="370" y="41" fontSize="10" fill="#E24B4A">5–8 m 離れて配置</text>
+          </>)}
+        </svg>
+
+        <div style={{ background:"#E6F1FB", borderLeft:"3px solid #378ADD", borderRadius:"0 8px 8px 0", padding:"10px 12px", fontSize:13, color:"#185FA5" }}>
+          {angle === "sagittal"
+            ? "側面（矢状面）では股・膝・足関節の屈伸角度を評価します。カメラは大転子の高さに合わせてください。"
+            : "正面では骨盤の側方傾斜・膝の内外反・足先角度を評価します。カメラは胸骨柄の高さ（約130–140 cm）に合わせてください。"}
+        </div>
+      </Card>
+
+      <Card>
+        <CardTitle icon="⚙️">推奨セットアップ</CardTitle>
+        {specs.map(([k,v]) => (
+          <div key={k} style={{ display:"flex", justifyContent:"space-between", padding:"7px 0", borderBottom:"0.5px solid #eee", fontSize:13 }}>
+            <span style={{ color:"#666" }}>{k}</span>
+            <span style={{ fontWeight:500 }}>{v}</span>
+          </div>
+        ))}
+      </Card>
+
+      <Card>
+        <CardTitle icon="✅">撮影前チェックリスト</CardTitle>
+        {CHECKS[angle].map((c, i) => (
+          <div key={i} onClick={() => setChecked(p=>({...p,[i]:!p[i]}))}
+            style={{ display:"flex", alignItems:"center", gap:10, padding:"7px 0", borderBottom:"0.5px solid #eee", fontSize:13, cursor:"pointer" }}>
+            <div style={{
+              width:16, height:16, borderRadius:4, flexShrink:0,
+              border:`1.5px solid ${checked[i]?"#1D9E75":"#bbb"}`,
+              background: checked[i]?"#1D9E75":"#fff",
+              display:"flex", alignItems:"center", justifyContent:"center",
+            }}>
+              {checked[i] && <span style={{ color:"#fff", fontSize:10 }}>✓</span>}
+            </div>
+            <span style={{ color: checked[i]?"#1D9E75":"#333" }}>{c}</span>
+          </div>
+        ))}
+      </Card>
+
+      <NavRow><Btn onClick={onNext} primary>次へ：動画を入力する →</Btn></NavRow>
+    </div>
+  );
+}
+
+// ── Step 2: 動画入力 ──────────────────────────────────
+function Step2({ onBack, onNext, refs }) {
+  const [inputMode, setInputMode] = useState("upload");
+  const [preURL, setPreURL] = useState(null);
+  const [postURL, setPostURL] = useState(null);
+  const [camActive, setCamActive] = useState(false);
+  const [snaps, setSnaps] = useState({ pre:null, post:null });
+  const preVideoRef = useRef(); const postVideoRef = useRef();
+  const camVideoRef = useRef(); const snapCanvasRef = useRef();
+  const streamRef = useRef(null);
+
+  const extractFrame = (videoEl, which) => {
+    videoEl.addEventListener("seeked", () => {
+      const c = document.createElement("canvas");
+      c.width = videoEl.videoWidth||640; c.height = videoEl.videoHeight||360;
+      c.getContext("2d").drawImage(videoEl,0,0);
+      refs[which].current = c.toDataURL("image/jpeg",0.8);
+    }, { once:true });
+    videoEl.currentTime = 0.5;
+  };
+
+  const handleUpload = (e, which) => {
+    const file = e.target.files[0]; if(!file) return;
+    const url = URL.createObjectURL(file);
+    if(which==="pre") setPreURL(url); else setPostURL(url);
+  };
+
+  useEffect(()=>{ if(preURL && preVideoRef.current) preVideoRef.current.onloadeddata=()=>extractFrame(preVideoRef.current,"pre"); },[preURL]);
+  useEffect(()=>{ if(postURL && postVideoRef.current) postVideoRef.current.onloadeddata=()=>extractFrame(postVideoRef.current,"post"); },[postURL]);
+
+  const startCamera = async () => {
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}});
+      streamRef.current = s; camVideoRef.current.srcObject = s; setCamActive(true);
+    } catch { alert("カメラへのアクセスが許可されていません"); }
+  };
+
+  const capture = (which) => {
+    const v = camVideoRef.current; const c = snapCanvasRef.current;
+    c.width=v.videoWidth; c.height=v.videoHeight;
+    c.getContext("2d").drawImage(v,0,0);
+    const data = c.toDataURL("image/jpeg",0.8);
+    refs[which].current = data;
+    setSnaps(p=>({...p,[which]:data}));
+  };
+
+  const UploadZone = ({ label, url, videoRef, which }) => (
+    <div style={{ flex:1 }}>
+      <div style={{ fontSize:12, color:"#888", marginBottom:6, fontWeight:500 }}>{label}</div>
+      {!url ? (
+        <label style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:8, border:"1.5px dashed #ccc", borderRadius:12, padding:"1.5rem 0.5rem", cursor:"pointer", fontSize:13, color:"#aaa", minHeight:120 }}>
+          <span style={{ fontSize:28 }}>🎬</span>
+          <span style={{ textAlign:"center" }}>{label}の動画を<br/>タップして選択</span>
+          <input type="file" accept="video/*" onChange={e=>handleUpload(e,which)} style={{ display:"none" }}/>
+        </label>
+      ) : (
+        <video ref={videoRef} src={url} controls style={{ width:"100%", borderRadius:8, maxHeight:160 }}/>
+      )}
+    </div>
+  );
+
+  return (
+    <div>
+      <Card>
+        <CardTitle icon="🎥">動画入力モード</CardTitle>
+        <ModeTabs options={[["upload","動画アップロード"],["camera","リアルタイム撮影"]]} value={inputMode} onChange={setInputMode}/>
+
+        {inputMode==="upload" ? (
+          <div style={{ display:"flex", gap:12 }}>
+            <UploadZone label="治療前" url={preURL} videoRef={preVideoRef} which="pre"/>
+            <UploadZone label="治療後" url={postURL} videoRef={postVideoRef} which="post"/>
+          </div>
+        ) : (
+          <div>
+            <div style={{ position:"relative", background:"#000", borderRadius:8, overflow:"hidden", aspectRatio:"16/9", marginBottom:8 }}>
+              <video ref={camVideoRef} autoPlay muted playsInline style={{ width:"100%", height:"100%", objectFit:"cover" }}/>
+              {!camActive && (
+                <div style={{ position:"absolute", inset:0, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:8, background:"rgba(0,0,0,0.6)" }}>
+                  <span style={{ fontSize:32 }}>📷</span>
+                  <span style={{ color:"#aaa", fontSize:13 }}>カメラを起動してください</span>
+                </div>
+              )}
+            </div>
+            <canvas ref={snapCanvasRef} style={{ display:"none" }}/>
+            <div style={{ display:"flex", gap:8, marginBottom:8 }}>
+              <Btn onClick={startCamera}>カメラ起動</Btn>
+              <Btn onClick={()=>capture("pre")} disabled={!camActive}>治療前を撮影</Btn>
+              <Btn onClick={()=>capture("post")} disabled={!camActive}>治療後を撮影</Btn>
+            </div>
+            <div style={{ display:"flex", gap:8 }}>
+              {["pre","post"].map(w=>(
+                <div key={w} style={{ flex:1 }}>
+                  <div style={{ fontSize:12, color:"#888", marginBottom:4 }}>{w==="pre"?"治療前":"治療後"}フレーム</div>
+                  {snaps[w]
+                    ? <img src={snaps[w]} style={{ width:"100%", borderRadius:8 }} alt=""/>
+                    : <div style={{ background:"#111", borderRadius:8, height:100, display:"flex", alignItems:"center", justifyContent:"center", color:"#444", fontSize:12 }}>未撮影</div>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <CardTitle icon="👤">患者情報（任意）</CardTitle>
+        {[["患者ID","PT-001",refs.patient],["診断名","脳卒中後片麻痺",refs.diagnosis]].map(([label,ph,ref])=>(
+          <div key={label} style={{ display:"flex", alignItems:"center", gap:12, padding:"7px 0", borderBottom:"0.5px solid #eee" }}>
+            <span style={{ minWidth:70, fontSize:13, color:"#666" }}>{label}</span>
+            <input ref={ref} type="text" placeholder={`例: ${ph}`} style={{ flex:1, border:"0.5px solid #ddd", borderRadius:8, padding:"6px 10px", fontSize:13 }}/>
+          </div>
+        ))}
+        <div style={{ display:"flex", alignItems:"center", gap:12, padding:"7px 0" }}>
+          <span style={{ minWidth:70, fontSize:13, color:"#666" }}>撮影角度</span>
+          <select ref={refs.angle} style={{ flex:1, border:"0.5px solid #ddd", borderRadius:8, padding:"6px 10px", fontSize:13 }}>
+            <option value="sagittal">側面（矢状面）</option>
+            <option value="frontal">正面</option>
+          </select>
+        </div>
+      </Card>
+
+      <NavRow>
+        <Btn onClick={onBack}>← 戻る</Btn>
+        <Btn onClick={onNext} primary>AI解析を開始する →</Btn>
+      </NavRow>
+    </div>
+  );
+}
+
+// ── Step 3: AI解析 ──────────────────────────────────
+function Step3({ onBack, onNext, refs }) {
+  const [status, setStatus] = useState("running");
+  const [result, setResult] = useState(null);
+
+  useEffect(() => { runAnalysis(); }, []);
+
+  const runAnalysis = async () => {
+    if (!window.getKey()) {
+      refs.errorMsg.current = "APIキーが未入力です。画面上部のバナーにキーを入力して「保存」を押してください。";
+      setStatus("error");
+      return;
+    }
+    setStatus("running");
+    const angle = refs.angle.current?.value || "sagittal";
+    const diagnosis = refs.diagnosis.current?.value || "不明";
+    const hasImages = refs.pre.current && refs.post.current;
+
+    const prompt = `あなたは理学療法士向けの歩行解析AIです。
+撮影角度: ${angle==="sagittal"?"側面（矢状面）":"正面"}
+診断名: ${diagnosis}
+${hasImages?"治療前後のフレームが提供されています。実際の画像を見て解析してください。":"デモとして典型的な片麻痺歩行パターンを解析してください。"}
+
+以下のJSONのみを返してください（コードブロック・前後テキスト不要）:
+{"angles":{"hip_pre":10,"hip_post":22,"knee_pre":15,"knee_post":32,"ankle_pre":-5,"ankle_post":8},"pattern":{"label":"鎌刈り歩行","description":"右下肢の遊脚期に股関節外転・外旋を伴う代償動作が観察されます。体幹の右側屈も顕著です。"},"cog":{"score":58,"description":"重心の側方動揺が増大。右立脚期に骨盤降下（トレンデレンブルグ様）が観察されます。"},"flags":["鎌刈り歩行","トレンデレンブルグ徴候","遊脚期クリアランス不足","立脚期短縮（患側）"],"rehab":"【主要問題点】\\n1. 右中殿筋の筋力低下（MMT 3+相当）\\n2. 足関節背屈可動域制限（背屈−5°）\\n3. 遊脚期における体幹側屈代償\\n\\n【推奨リハビリプログラム】\\n・クラムシェル / 側臥位外転運動（中殿筋強化）\\n・足関節背屈ストレッチ＋タオルギャザー\\n・平行棒内での鏡視フィードバック歩行訓練\\n・重心移動訓練（体重計2台を用いた左右均等荷重）"}`;
+
+    try {
+      const content = hasImages
+        ? [
+            {type:"image", source:{type:"base64", media_type:"image/jpeg", data:refs.pre.current.split(",")[1]}},
+            {type:"image", source:{type:"base64", media_type:"image/jpeg", data:refs.post.current.split(",")[1]}},
+            {type:"text", text:prompt},
+          ]
+        : prompt;
+
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method:"POST",
+        headers:{
+          "Content-Type":"application/json",
+          "x-api-key": window.getKey(),
+          "anthropic-version":"2023-06-01",
+          "anthropic-dangerous-direct-browser-access":"true",
+        },
+        body: JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:1000, messages:[{role:"user",content}] }),
+      });
+      const data = await res.json();
+      if(data.error) throw new Error(data.error.message);
+      const text = data.content.map(i=>i.text||"").join("");
+      const clean = text.replace(/```json|```/g,"").trim();
+      const parsed = JSON.parse(clean);
+      refs.result.current = parsed;
+      setResult(parsed);
+      setStatus("done");
+    } catch(e) {
+      console.error(e);
+      setStatus("error");
+      refs.errorMsg.current = e.message || "不明なエラー";
+    }
+  };
+
+  const scoreColor = s => s>75?"#1D9E75":s>50?"#BA7517":"#E24B4A";
+
+  return (
+    <div>
+      {status==="running" && (
+        <Card>
+          <div style={{ display:"flex", alignItems:"center", gap:10, fontSize:13, color:"#666" }}>
+            <span className="dot"/><span className="dot"/><span className="dot"/>
+            解析中です。少しお待ちください...
+          </div>
+        </Card>
+      )}
+      {status==="error" && (
+        <Card>
+          <p style={{ color:"#A32D2D", fontSize:14, fontWeight:500, marginBottom:6 }}>
+            ⚠ 解析に失敗しました
+          </p>
+          <p style={{ color:"#666", fontSize:13, marginBottom:12, lineHeight:1.6, background:"#FCEBEB", padding:"8px 10px", borderRadius:8 }}>
+            {refs.errorMsg.current || "不明なエラーです。コンソール（F12）を確認してください。"}
+          </p>
+          <NavRow><Btn onClick={runAnalysis} primary>再試行</Btn></NavRow>
+        </Card>
+      )}
+      {status==="done" && result && (<>
+        <Card>
+          <CardTitle icon="📊">関節角度（治療前 → 治療後）</CardTitle>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8 }}>
+            {[["股関節",result.angles.hip_pre,result.angles.hip_post],
+              ["膝関節",result.angles.knee_pre,result.angles.knee_post],
+              ["足関節",result.angles.ankle_pre,result.angles.ankle_post]].map(([name,pre,post])=>{
+              const diff = post-pre;
+              return (
+                <div key={name} style={{ background:"#f8f9fb", borderRadius:8, padding:10, textAlign:"center" }}>
+                  <div style={{ fontSize:10, color:"#aaa", marginBottom:4 }}>前→後</div>
+                  <div style={{ display:"flex", alignItems:"baseline", justifyContent:"center", gap:3 }}>
+                    <span style={{ fontSize:13, color:"#999" }}>{pre}°→</span>
+                    <span style={{ fontSize:22, fontWeight:500 }}>{post}°</span>
+                  </div>
+                  <div style={{ fontSize:11, fontWeight:500, color:diff>0?"#1D9E75":"#E24B4A" }}>
+                    {diff>0?"+":""}{diff}°
+                  </div>
+                  <div style={{ fontSize:11, color:"#999", marginTop:2 }}>{name}</div>
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+
+        <Card>
+          <CardTitle icon="🚶">歩行パターン評価</CardTitle>
+          <span style={{ background:"#FAEEDA", color:"#854F0B", fontSize:11, padding:"2px 8px", borderRadius:20, fontWeight:500 }}>
+            {result.pattern.label}
+          </span>
+          <p style={{ fontSize:13, color:"#666", marginTop:8, lineHeight:1.7 }}>{result.pattern.description}</p>
+        </Card>
+
+        <Card>
+          <CardTitle icon="🎯">重心評価</CardTitle>
+          <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:8 }}>
+            <span style={{ fontSize:22, fontWeight:500 }}>
+              {result.cog.score}<span style={{ fontSize:13, fontWeight:400, color:"#aaa" }}>/100</span>
+            </span>
+            <div style={{ flex:1, background:"#eee", borderRadius:4, height:8 }}>
+              <div style={{ width:`${result.cog.score}%`, height:8, borderRadius:4, background:scoreColor(result.cog.score), transition:"width 0.6s ease" }}/>
+            </div>
+          </div>
+          <p style={{ fontSize:13, color:"#666", lineHeight:1.7 }}>{result.cog.description}</p>
+        </Card>
+
+        <Card>
+          <CardTitle icon="⚠️">病的所見フラグ</CardTitle>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:4 }}>
+            {result.flags.map(f=>(
+              <span key={f} style={{ background:"#FCEBEB", color:"#A32D2D", fontSize:11, padding:"3px 8px", borderRadius:4, fontWeight:500 }}>⚠ {f}</span>
+            ))}
+          </div>
+        </Card>
+
+        <Card>
+          <CardTitle icon="📋">問題点と推奨リハビリ</CardTitle>
+          <pre style={{ fontSize:13, color:"#555", lineHeight:1.8, whiteSpace:"pre-wrap", fontFamily:"inherit" }}>{result.rehab}</pre>
+        </Card>
+
+        <NavRow>
+          <Btn onClick={onBack}>← 動画を変更</Btn>
+          <Btn onClick={onNext} primary>レポートへ →</Btn>
+        </NavRow>
+      </>)}
+    </div>
+  );
+}
+
+// ── Step 4: レポート ──────────────────────────────────
+function Step4({ onBack, refs }) {
+  const [note, setNote] = useState("");
+  const result = refs.result.current;
+
+  const reportText = result
+    ? `歩行解析レポート
+作成日: ${new Date().toLocaleDateString("ja-JP")}
+患者ID: ${refs.patient.current?.value||"未入力"}　診断名: ${refs.diagnosis.current?.value||"未入力"}
+
+■ 関節角度（治療前 → 治療後）
+  股関節: ${result.angles.hip_pre}° → ${result.angles.hip_post}°
+  膝関節: ${result.angles.knee_pre}° → ${result.angles.knee_post}°
+  足関節: ${result.angles.ankle_pre}° → ${result.angles.ankle_post}°
+
+■ 歩行パターン
+  ${result.pattern.label}: ${result.pattern.description}
+
+■ 重心評価スコア: ${result.cog.score}/100
+  ${result.cog.description}
+
+■ 病的所見フラグ
+  ${result.flags.join(" / ")}
+
+■ 問題点と推奨リハビリ
+${result.rehab}
+
+■ セラピストメモ
+${note||"（なし）"}`
+    : "解析結果がありません。Step 3 に戻って解析を実行してください。";
+
+  const download = () => {
+    const blob = new Blob([reportText], {type:"text/plain;charset=utf-8"});
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `gait_report_${new Date().toISOString().slice(0,10)}.txt`;
+    a.click();
+  };
+
+  return (
+    <div>
+      <Card>
+        <CardTitle icon="📄">解析レポート</CardTitle>
+        <pre style={{ fontSize:12, color:"#555", lineHeight:1.8, whiteSpace:"pre-wrap", background:"#f8f9fb", padding:"1rem", borderRadius:8, fontFamily:"monospace", overflowX:"auto" }}>
+          {reportText}
+        </pre>
+      </Card>
+      <Card>
+        <CardTitle icon="✏️">セラピストメモ</CardTitle>
+        <textarea value={note} onChange={e=>setNote(e.target.value)} rows={4}
+          placeholder="追記・修正事項をここに入力..."
+          style={{ width:"100%", border:"0.5px solid #ddd", borderRadius:8, padding:10, fontSize:13, resize:"vertical", fontFamily:"inherit" }}/>
+      </Card>
+      <NavRow>
+        <Btn onClick={onBack}>← 解析結果へ</Btn>
+        <Btn onClick={download} primary>テキストをダウンロード ↓</Btn>
+      </NavRow>
+    </div>
+  );
+}
+
+// ── メインアプリ ──────────────────────────────────────
+function App() {
+  const [step, setStep] = useState(0);
+  const refs = {
+    patient:   useRef(),
+    diagnosis: useRef(),
+    angle:     useRef(),
+    pre:       useRef(null),
+    post:      useRef(null),
+    result:    useRef(null),
+    errorMsg:  useRef(""),
+  };
+  return (
+    <div style={{ maxWidth:680, margin:"0 auto", padding:"1.5rem 1rem" }}>
+      <div style={{ marginBottom:"1.5rem" }}>
+        <h1 style={{ fontSize:20, fontWeight:500, marginBottom:4 }}>歩行解析 AI</h1>
+        <p style={{ fontSize:13, color:"#888" }}>Urasoe General Hospital — Gait Analysis System</p>
+      </div>
+      <StepNav current={step}/>
+      {step===0 && <Step1 onNext={()=>setStep(1)}/>}
+      {step===1 && <Step2 onBack={()=>setStep(0)} onNext={()=>setStep(2)} refs={refs}/>}
+      {step===2 && <Step3 onBack={()=>setStep(1)} onNext={()=>setStep(3)} refs={refs}/>}
+      {step===3 && <Step4 onBack={()=>setStep(2)} refs={refs}/>}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
